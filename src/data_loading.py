@@ -11,7 +11,7 @@ from balance.stats_and_plots.weighted_stats import weighted_mean as bal_wmean
 _NFHS5_COLS = [
     "hhid", "hvidx",
     "hv001", "hv002",
-    "hv005", "hv021", "hv022", "hv025", "hv006", "hv007", "hv270",
+    "hv005", "hv021", "hv022", "hv024", "hv025", "hv006", "hv007", "hv270",
     "hv104", "hv105", "hv106",
     "shb18s", "shb18d", "shb25s", "shb25d", "shb29s", "shb29d",
     "shb14a", "shb14b", "shb14c", "shb14d",
@@ -44,6 +44,7 @@ _NFHS5_RENAME = {
     "hv005":  "Household sample weight (6 decimals)",
     "hv021":  "Primary sampling unit",
     "hv022":  "Sample strata for sampling errors",
+    "hv024":  "State code",
     "hv025":  "Type of place of residence",
     "hv006":  "Month of interview",
     "hv007":  "Year of interview",
@@ -156,6 +157,12 @@ def load_nfhs5(dta_path="Data/household_2021_recode/IAPR7EFL.DTA", *, verbose=Tr
     for c in BP_COLS:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+            # BP of 0 is physiologically impossible — recode to missing
+            n_zero = (df[c] == 0).sum()
+            if n_zero:
+                df.loc[df[c] == 0, c] = np.nan
+                if verbose:
+                    print(f"Cleaned {n_zero:,} zero values in '{c}'")
 
     if "Waist curcumference" in df.columns:
         df["Waist curcumference"] = pd.to_numeric(df["Waist curcumference"], errors="coerce")
@@ -186,7 +193,7 @@ def load_nfhs5(dta_path="Data/household_2021_recode/IAPR7EFL.DTA", *, verbose=Tr
 
 _NFHS4_COLS = [
     "hv001", "hv002", "hvidx",
-    "hv005", "hv021", "hv022", "hv025", "hv006", "hv007", "hv270",
+    "hv005", "hv021", "hv022", "hv024", "hv025", "hv006", "hv007", "hv270",
     "hv104", "hv105", "hv106",
     "shb16s", "shb16d", "shb23s", "shb23d", "shb27s", "shb27d",
     "shb12a", "shb12b", "shb12c", "shb12d",
@@ -216,7 +223,10 @@ _NFHS4_RENAME = {
     "hv005":  "Household sample weight (6 decimals)",
     "hv021":  "Primary sampling unit",
     "hv022":  "Sample strata for sampling errors",
+    "hv024":  "State code",
     "hv025":  "Type of place of residence",
+    "hv006":  "Month of interview",
+    "hv007":  "Year of interview",
     "hv270":  "Wealth index combined",
     "sh36":   "Caste or tribe",
 }
@@ -318,6 +328,11 @@ def load_nfhs4(dta_path="Data/Household_2016/IAPR74FL.DTA", *, verbose=True):
     for c in BP_COLS:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+            n_zero = (df[c] == 0).sum()
+            if n_zero:
+                df.loc[df[c] == 0, c] = np.nan
+                if verbose:
+                    print(f"NFHS-4: Cleaned {n_zero:,} zero values in '{c}'")
 
     df = df.dropna(subset=BP_COLS, how="all").copy()
 
