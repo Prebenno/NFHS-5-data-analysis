@@ -20,10 +20,12 @@ from .config import (
     SYSTOLIC_COLS, DIASTOLIC_COLS, ALL_BP_COLS,
     READING_PAIRS, HTN_ORDER, PANEL_LABELS,
     N_BRACKETS, N_HEIGHT_BRACKETS,
+    SBP_COL, DBP_COL, BMI_RANGES, COARSE_BMI, COARSE_AGE, BMI_ORDER, AGE_ORDER,
 )
 from .analysis import (
     group_stats, split_into_brackets, weighted_pearson_r,
     ecdf_ci_from_weights, disease_sbp_pvalue,
+    get_mean_bp_by_age_bmi, prepare_heatmap_data, get_coarse_stats, compute_coarse_did,
 )
 
 
@@ -793,4 +795,139 @@ def plot_disease_sbp_table(table, disease_name, fname, pvalue=None):
     ax.set_title(title, fontsize=13, fontweight="bold", pad=20)
     fig.tight_layout()
     _save(fig, fname)
+    plt.show()
+
+
+
+
+def plot_composite_heatmap(comparisons, suptitle, filename, vmin=-8, vmax=8):
+    nrows = len(comparisons)
+    fig, axes = plt.subplots(nrows, 2, figsize=(14, 4.5 * nrows))
+    if nrows == 1:
+        axes = axes.reshape(1, -1)
+    for i, (base, comp, label) in enumerate(comparisons):
+        res = get_mean_bp_by_age_bmi(base, comp, bmi_dict=BMI_RANGES)
+        df = prepare_heatmap_data(res)
+        for j, (col, bp_lbl) in enumerate([
+            ('Systolic Difference', 'Systolic'),
+            ('Diastolic Difference', 'Diastolic'),
+        ]):
+            ax = axes[i, j]
+            pivot = df.pivot(index='BMI', columns='Age', values=col)
+            sns.heatmap(pivot, annot=False, cmap='coolwarm', center=0,
+                        vmin=vmin, vmax=vmax, linewidths=.5, ax=ax)
+            ax.set_title(f'{bp_lbl} BP Difference ({label})')
+   
+    plt.tight_layout()
+    _save(fig, f'{filename}.png')
+    plt.show()
+
+
+def _coarse_panel(ax, stats, title, cmap='coolwarm', vmin=110, vmax=128, show_n=True, center=None):
+    values = np.full((3, 3), np.nan)
+    annot_text = np.empty((3, 3), dtype=object)
+    total_n = 0
+    for i, bmi in enumerate(BMI_ORDER):
+        for j, age in enumerate(AGE_ORDER):
+            if (bmi, age) in stats:
+                v = stats[(bmi, age)]['value']
+                n = stats[(bmi, age)]['n']
+                values[i, j] = v
+                total_n += n
+                annot_text[i, j] = f"{v:.1f}\n(n={n})" if show_n else f"{v:.1f}"
+            else:
+                annot_text[i, j] = ""
+    df_grid = pd.DataFrame(values, index=BMI_ORDER, columns=AGE_ORDER)
+    sns.heatmap(df_grid, annot=annot_text, fmt='', cmap=cmap, center=center,
+                linewidths=1, ax=ax, vmin=vmin, vmax=vmax,
+                annot_kws={'fontsize': 10, 'fontweight': 'bold'})
+    ax.set_title(title, fontsize=9)
+    ax.set_ylabel('BMI Group')
+    ax.set_xlabel('Age Group')
+    return total_n
+
+
+def _coarse_diff_panel(ax, stats_base, stats_comp, title, vmin=-5, vmax=5):
+    values = np.full((3, 3), np.nan)
+    annot_text = np.empty((3, 3), dtype=object)
+    for i, bmi in enumerate(BMI_ORDER):
+        for j, age in enumerate(AGE_ORDER):
+            if (bmi, age) in stats_base and (bmi, age) in stats_comp:
+                d = stats_comp[(bmi, age)]['value'] - stats_base[(bmi, age)]['value']
+                values[i, j] = d
+                annot_text[i, j] = f"{d:.1f}"
+            else:
+                annot_text[i, j] = ""
+    df_grid = pd.DataFrame(values, index=BMI_ORDER, columns=AGE_ORDER)
+    sns.heatmap(df_grid, annot=annot_text, fmt='', cmap='coolwarm', center=0,
+                linewidths=1, ax=ax, vmin=vmin, vmax=vmax,
+                annot_kws={'fontsize': 11, 'fontweight': 'bold'})
+    ax.set_title(title, fontsize=9)
+    ax.set_ylabel('BMI Group')
+    ax.set_xlabel('Age Group')
+
+
+def plot_coarse_comparison_row(ax_row, n5_data, n4_data, bp_col, label_n5, label_n4, gender, period,
+                                bp_label='Systolic', abs_vmin=110, abs_vmax=128, diff_vmin=-5, diff_vmax=5):
+    stats_n5 = get_coarse_stats(n5_data, bp_col)
+    stats_n4 = get_coarse_stats(n4_data, bp_col)
+    n_n5 = _coarse_panel(ax_row[0], stats_n5,
+                          f'{bp_label} BP Comparison ({period})\n{label_n5} ({gender})',
+                          cmap='coolwarm', vmin=abs_vmin, vmax=abs_vmax, show_n=True, center=(abs_vmin+abs_vmax)/2)
+    n_n4 = _coarse_panel(ax_row[1], stats_n4,
+                          f'{bp_label} BP Comparison ({period})\n{label_n4} ({gender})',
+                          cmap='coolwarm', vmin=abs_vmin, vmax=abs_vmax, show_n=True, center=(abs_vmin+abs_vmax)/2)
+    _coarse_diff_panel(ax_row[2], stats_n4, stats_n5,
+                        f'{bp_label} BP Comparison ({period})\nDifference ({label_n5} - {label_n4}) ({gender})',
+                        vmin=diff_vmin, vmax=diff_vmax)
+    ax_row[0].set_title(ax_row[0].get_title() + f'\nTotal N = {n_n5}', fontsize=9)
+    ax_row[1].set_title(ax_row[1].get_title() + f'\nTotal N = {n_n4}', fontsize=9)
+    return n_n5, n_n4
+
+
+def plot_coarse_did(datasets, filename, vmin=-2, vmax=2):
+
+    fig, axes = plt.subplots(2, len(datasets), figsize=(7 * len(datasets), 10))
+    for j, (gender, pre_n5, post_n5, pre_n4, post_n4) in enumerate(datasets):
+        for i, (bp_col, bp_label) in enumerate([(SBP_COL, 'Mean_Systolic'), (DBP_COL, 'Mean_Diastolic')]):
+            did_stats = compute_coarse_did(pre_n5, post_n5, pre_n4, post_n4, bp_col)
+
+            ax = axes[i, j]
+            values = np.full((3, 3), np.nan)
+            annot_text = np.empty((3, 3), dtype=object)
+            for ii, bmi in enumerate(BMI_ORDER):
+                for jj, age in enumerate(AGE_ORDER):
+                    if (bmi, age) in did_stats:
+                        v = did_stats[(bmi, age)]['value']
+                        values[ii, jj] = v
+                        annot_text[ii, jj] = f"{v:.1f}"
+                    else:
+                        annot_text[ii, jj] = ""
+            df_grid = pd.DataFrame(values, index=BMI_ORDER, columns=AGE_ORDER)
+            sns.heatmap(df_grid, annot=annot_text, fmt='', cmap='coolwarm', center=0,
+                        linewidths=1, ax=ax, vmin=vmin, vmax=vmax,
+                        annot_kws={'fontsize': 12, 'fontweight': 'bold'})
+            ax.set_title(f'BP Diff Change ({bp_label}) Change ({gender})', fontsize=11)
+            ax.set_ylabel('BMI Group')
+            ax.set_xlabel('Age Group')
+
+    fig.text(0.01, 0.97, 'B', fontsize=20, fontweight='bold', va='top')
+    plt.tight_layout()
+    _save(fig, f'{filename}.png')
+    plt.show()
+
+
+def plot_coarse_absolute_grid(rows_config, bp_col, bp_label, filename,
+                               abs_vmin=110, abs_vmax=130, diff_vmin=-6, diff_vmax=6,
+                               suptitle=None):
+    nrows = len(rows_config)
+    fig, axes = plt.subplots(nrows, 3, figsize=(20, 5 * nrows))
+    for i, (n5, n4, lbl_n5, lbl_n4, gender, period) in enumerate(rows_config):
+        plot_coarse_comparison_row(axes[i], n5, n4, bp_col, lbl_n5, lbl_n4, gender, period,
+                                   bp_label=bp_label, abs_vmin=abs_vmin, abs_vmax=abs_vmax,
+                                   diff_vmin=diff_vmin, diff_vmax=diff_vmax)
+    if suptitle:
+        plt.suptitle(suptitle, fontsize=14, y=1.01)
+    plt.tight_layout()
+    _save(fig, f'{filename}.png')
     plt.show()

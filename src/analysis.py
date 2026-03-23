@@ -11,6 +11,8 @@ from balance.stats_and_plots.weighted_stats import (
 from .config import (
     ALL_BP_COLS, READING_PAIRS, HTN_ORDER,
     SYSTOLIC_COLS, DIASTOLIC_COLS,
+    SBP_COL, DBP_COL, BMI_RANGES, COARSE_BMI, COARSE_AGE, BMI_ORDER, AGE_ORDER,
+    PHASE2_STATE_CODES,
 )
 
 
@@ -356,3 +358,106 @@ def build_disease_sbp_table(df_n5, df_n4, disease_col,
 
     table.attrs["ks_pvalue"] = disease_sbp_pvalue(df_n5, disease_col, sbp_col)
     return table
+
+
+
+def weighted_mean_simple(vals, wts):
+    mask = np.isfinite(vals) & np.isfinite(wts) & (wts > 0)
+    if not mask.any():
+        return np.nan
+    return np.average(vals[mask], weights=wts[mask])
+
+
+def get_mean_bp_by_age_bmi(data_base, data_compare, ages=range(15, 50), bmi_dict=None):
+    if bmi_dict is None:
+        bmi_dict = BMI_RANGES
+    results = {}
+    for age in ages:
+        for bmi_label, (lo, hi) in bmi_dict.items():
+            base = data_base[(data_base['Age of household members'] == age) &
+                             (data_base['BMI'] >= lo) & (data_base['BMI'] < hi)]
+            comp = data_compare[(data_compare['Age of household members'] == age) &
+                                (data_compare['BMI'] >= lo) & (data_compare['BMI'] < hi)]
+            if len(base) >= 10 and len(comp) >= 10:
+                sb = weighted_mean_simple(base[SBP_COL].values, base['weight'].values)
+                sc = weighted_mean_simple(comp[SBP_COL].values, comp['weight'].values)
+                db = weighted_mean_simple(base[DBP_COL].values, base['weight'].values)
+                dc = weighted_mean_simple(comp[DBP_COL].values, comp['weight'].values)
+                if np.isfinite(sb) and np.isfinite(sc):
+                    results[(age, bmi_label)] = {
+                        'systolic_diff': sc - sb,
+                        'diastolic_diff': dc - db,
+                    }
+    return results
+
+
+def prepare_heatmap_data(results):
+    rows = []
+    for (age, bmi), vals in results.items():
+        rows.append({'Age': age, 'BMI': bmi,
+                     'Systolic Difference': vals['systolic_diff'],
+                     'Diastolic Difference': vals['diastolic_diff']})
+    return pd.DataFrame(rows)
+
+
+def get_coarse_stats(data, bp_col):
+    results = {}
+    for bmi_lbl, (bmi_lo, bmi_hi) in COARSE_BMI.items():
+        for age_lbl, (age_lo, age_hi) in COARSE_AGE.items():
+            mask = (
+                (data['BMI'] >= bmi_lo) & (data['BMI'] < bmi_hi) &
+                (data['Age of household members'] >= age_lo) &
+                (data['Age of household members'] < age_hi) &
+                data[bp_col].notna() & data['weight'].notna()
+            )
+            subset = data[mask]
+            n = len(subset)
+            if n > 0:
+                bp = weighted_mean_simple(subset[bp_col].values, subset['weight'].values)
+                results[(bmi_lbl, age_lbl)] = {'value': bp, 'n': n}
+    return results
+
+
+def compute_coarse_did(pre_n5, post_n5, pre_n4, post_n4, bp_col):
+    
+    
+    stats_pre_n5 = get_coarse_stats(pre_n5, bp_col)
+    stats_pre_n4 = get_coarse_stats(pre_n4, bp_col)
+    stats_post_n5 = get_coarse_stats(post_n5, bp_col)
+    stats_post_n4 = get_coarse_stats(post_n4, bp_col)
+
+    did_stats = {}
+    for bmi in BMI_ORDER:
+        for age in AGE_ORDER:
+            key = (bmi, age)
+            if all(key in s for s in [stats_pre_n5, stats_pre_n4, stats_post_n5, stats_post_n4]):
+                diff_post = stats_post_n5[key]['value'] - stats_post_n4[key]['value']
+                diff_pre = stats_pre_n5[key]['value'] - stats_pre_n4[key]['value']
+                did_stats[key] = {'value': diff_post - diff_pre, 'n': 0}
+    return did_stats
+
+
+def split_covid(male_df, female_df):
+    
+    male_df  = male_df.dropna(subset=['Year of interview', 'Month of interview'])
+    female_df = female_df.dropna(subset=['Year of interview', 'Month of interview'])
+
+    year_m = male_df['Year of interview']; month_m = male_df['Month of interview']
+    year_f = female_df['Year of interview']; month_f = female_df['Month of interview']
+
+    pre_m = (year_m == 2019) | ((year_m == 2020) & (month_m <= 3))
+    post_m = ((year_m == 2020) & (month_m >= 11)) | (year_m == 2021)
+    pre_f = (year_f == 2019) | ((year_f == 2020) & (month_f <= 3))
+    post_f = ((year_f == 2020) & (month_f >= 11)) | (year_f == 2021)
+
+    return male_df[pre_m].copy(), male_df[post_m].copy(), female_df[pre_f].copy(), female_df[post_f].copy()
+
+
+def split_nfhs4_state_matched(male_df, female_df):
+
+    return (
+        male_df[~male_df['State code'].isin(PHASE2_STATE_CODES)].copy(),
+        male_df[male_df['State code'].isin(PHASE2_STATE_CODES)].copy(),
+        female_df[~female_df['State code'].isin(PHASE2_STATE_CODES)].copy(),
+        female_df[female_df['State code'].isin(PHASE2_STATE_CODES)].copy(),
+    )
